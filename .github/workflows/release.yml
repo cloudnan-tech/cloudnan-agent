@@ -82,6 +82,8 @@ jobs:
             install.sh
             install-docker-debian.sh
             install-docker-rhel.sh
+          draft: false
+          prerelease: false
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
