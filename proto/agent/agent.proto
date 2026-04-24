@@ -20,6 +20,9 @@ service AgentService {
   
   // Heartbeat - Keep-alive ping
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // GetContainerStats - Get real-time stats for containers
+  rpc GetContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse);
 }
 
 // ============== Registration ==============
@@ -211,6 +214,10 @@ message ContainerInfo {
   string health = 5; // "healthy", "unhealthy", "none"
   int32 restarts = 6;
   string started_at = 7;
+  string state = 8;          // "running", "exited", "paused", "created"
+  repeated string ports = 9; // e.g., ["80:8080", "443:8443"]
+  string ip_address = 10;    // Container IP
+  int64 uptime_seconds = 11; // How long container has been running
 }
 
 message ProcessInfo {
@@ -224,6 +231,33 @@ message ProcessInfo {
   uint64 disk_read_bytes = 8;   // bytes read since last poll (delta)
   uint64 disk_write_bytes = 9;  // bytes written since last poll (delta)
   uint32 net_connections = 10;  // active TCP/UDP connection count
+}
+
+// Real-time container statistics
+message ContainerStats {
+  string container_id = 1;
+  string container_name = 2;
+  double cpu_percent = 3;     // CPU usage percentage (0-100+)
+  int64 memory_usage = 4;     // Memory usage in bytes
+  int64 memory_limit = 5;     // Memory limit in bytes
+  double memory_percent = 6;  // Memory usage percentage
+  int64 network_rx = 7;       // Network bytes received
+  int64 network_tx = 8;       // Network bytes transmitted
+  int64 block_read = 9;       // Block I/O read bytes
+  int64 block_write = 10;     // Block I/O write bytes
+  int32 pids = 11;            // Number of processes
+  int64 timestamp = 12;       // Stats collection timestamp
+}
+
+// Request for container stats
+message ContainerStatsRequest {
+  string agent_id = 1;
+  repeated string container_ids = 2; // empty = all running containers
+}
+
+// Response with multiple container stats
+message ContainerStatsResponse {
+  repeated ContainerStats stats = 1;
 }
 
 message MetricsAck {
