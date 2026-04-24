@@ -1,0 +1,39 @@
+[Unit]
+Description=Cloudnan Agent
+Documentation=https://github.com/cloudnan-tech/cloudnan-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Configuration
+Environment=CLOUDNAN_AGENT_CONFIG=/etc/cloudnan/agent.yaml
+
+# Binary
+ExecStart=/usr/local/bin/cloudnan-agent --config ${CLOUDNAN_AGENT_CONFIG}
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudnan-agent
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

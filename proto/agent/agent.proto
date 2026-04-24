@@ -1,0 +1,328 @@
+syntax = "proto3";
+
+package agent;
+
+option go_package = "github.com/cloudnan-tech/cloudnan-agent/proto/agent";
+
+// AgentService handles communication between Control Plane and Agent
+service AgentService {
+  // Register - Agent registers itself with Control Plane
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  
+  // CommandStream - Bidirectional stream for sending commands and receiving responses
+  rpc CommandStream(stream CommandResponse) returns (stream Command);
+  
+  // StreamMetrics - Agent streams system metrics to Control Plane
+  rpc StreamMetrics(stream MetricsData) returns (stream MetricsAck);
+  
+  // StreamLogs - Agent streams logs to Control Plane in real-time
+  rpc StreamLogs(stream LogEntry) returns (stream LogAck);
+  
+  // Heartbeat - Keep-alive ping
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// ============== Registration ==============
+
+message RegisterRequest {
+  string agent_id = 1;        // Unique agent identifier (generated or assigned)
+  string hostname = 2;        // VPS hostname
+  string ip_address = 3;      // Public IP
+  string os = 4;              // e.g., "ubuntu", "debian", "centos"
+  string os_version = 5;      // e.g., "22.04"
+  string arch = 6;            // e.g., "amd64", "arm64"
+  string agent_version = 7;   // Agent binary version
+  map<string, string> labels = 8;  // Custom labels for grouping
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+  string assigned_id = 3;     // Control Plane may assign a different ID
+  int32 heartbeat_interval = 4;  // Seconds between heartbeats
+}
+
+// ============== Commands ==============
+
+message Command {
+  string id = 1;              // Unique command ID
+  CommandType type = 2;       // Type of command
+  repeated string args = 3;   // Command arguments
+  map<string, string> env = 4;  // Environment variables
+  int32 timeout_seconds = 5;  // Max execution time (0 = no limit)
+  bool stream_output = 6;     // Stream stdout/stderr in real-time
+  string working_dir = 7;     // Working directory for command
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  COMMAND_TYPE_EXEC = 1;      // Execute shell command
+  COMMAND_TYPE_INSTALL = 2;   // apt/yum install
+  COMMAND_TYPE_SERVICE = 3;   // systemctl start/stop/restart
+  COMMAND_TYPE_DOCKER = 4;    // Docker operations
+  COMMAND_TYPE_FILE = 5;      // File operations (read/write/delete)
+  COMMAND_TYPE_SCRIPT = 6;    // Execute script content
+  COMMAND_TYPE_SSH = 7;       // SSH key/config operations
+  COMMAND_TYPE_CHECK_MODULE = 8;  // Check if module binaries exist on filesystem
+  COMMAND_TYPE_RECONNECT = 9;     // Internal blue-green deploy handoff signal
+}
+
+message CommandResponse {
+  string command_id = 1;
+  CommandStatus status = 2;
+  int32 exit_code = 3;
+  string stdout = 4;          // For streaming, partial output
+  string stderr = 5;
+  int64 started_at = 6;       // Unix timestamp
+  int64 completed_at = 7;     // Unix timestamp (0 if still running)
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  COMMAND_STATUS_PENDING = 1;
+  COMMAND_STATUS_RUNNING = 2;
+  COMMAND_STATUS_COMPLETED = 3;
+  COMMAND_STATUS_FAILED = 4;
+  COMMAND_STATUS_TIMEOUT = 5;
+  COMMAND_STATUS_CANCELLED = 6;
+}
+
+// ============== Metrics ==============
+
+message MetricsData {
+  string agent_id = 1;
+  int64 timestamp = 2;        // Unix timestamp
+  
+  // CPU
+  double cpu_percent = 3;     // Overall CPU usage %
+  repeated double cpu_per_core = 4;  // Per-core usage
+  
+  // Memory
+  uint64 memory_total = 5;    // Total RAM in bytes
+  uint64 memory_used = 6;     // Used RAM in bytes
+  uint64 memory_available = 7;
+  double memory_percent = 8;
+  uint64 memory_cached = 16;
+  uint64 memory_buffers = 17;
+  uint64 swap_total = 18;
+  uint64 swap_used = 19;
+  uint64 swap_free = 20;
+  double swap_percent = 21;
+  
+  // Disk
+  repeated DiskMetrics disks = 9;
+  repeated DiskIO disk_io = 22;
+  
+  // Network
+  uint64 network_bytes_sent = 10;
+  uint64 network_bytes_recv = 11;
+  uint64 connections = 23;
+  
+  // Load average (Linux)
+  double load_1 = 12;
+  double load_5 = 13;
+  double load_15 = 14;
+  
+  // Uptime & Host
+  uint64 uptime_seconds = 15;
+  HostInfo host_info = 24;
+  
+  // Services & Containers
+  repeated ServiceInfo services = 25;
+  repeated ContainerInfo containers = 26;
+  
+  // Firewall
+  FirewallInfo firewall = 27;
+  
+  // Processes
+  repeated ProcessInfo processes = 28;
+
+  // CPU extended
+  double cpu_steal_time = 29;
+  double cpu_iowait = 30;
+
+  // Network extended
+  uint64 net_errin = 31;
+  uint64 net_errout = 32;
+  uint64 net_dropin = 33;
+  uint64 net_dropout = 34;
+}
+
+message FirewallInfo {
+  string status = 1; // "active", "inactive"
+  repeated FirewallRule rules = 2;
+}
+
+message FirewallRule {
+  string index = 1;
+  string to = 2;
+  string action = 3;
+  string from = 4;
+  string comment = 5;
+  string protocol = 6;
+}
+
+message DiskMetrics {
+  string mount_point = 1;
+  string device = 2;
+  uint64 total = 3;
+  uint64 used = 4;
+  uint64 free = 5;
+  double percent = 6;
+  string fstype = 7;
+  uint64 inodes_total = 8;
+  uint64 inodes_used = 9;
+  double inodes_percent = 10;
+}
+
+message DiskIO {
+  string name = 1;  // device name
+  uint64 read_count = 2;
+  uint64 write_count = 3;
+  uint64 read_bytes = 4;
+  uint64 write_bytes = 5;
+}
+
+message HostInfo {
+  string hostname = 1;
+  string os = 2;
+  string platform = 3;
+  string platform_family = 4;
+  string platform_version = 5;
+  string kernel_version = 6;
+  string kernel_arch = 7;
+  uint64 boot_time = 8;
+  string virtualization_system = 9;
+  string virtualization_role = 10;
+}
+
+message ServiceInfo {
+  string name = 1;
+  string status = 2; // "running", "stopped", "unknown"
+  int32 restarts = 3;
+  string last_restart = 4;
+}
+
+message ContainerInfo {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string status = 4; // "running", "exited", "paused"
+  string health = 5; // "healthy", "unhealthy", "none"
+  int32 restarts = 6;
+  string started_at = 7;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string name = 2;
+  string username = 3;
+  double cpu_percent = 4;
+  double mem_percent = 5;
+  uint64 rss = 6;
+  int64 create_time = 7;
+  uint64 disk_read_bytes = 8;   // bytes read since last poll (delta)
+  uint64 disk_write_bytes = 9;  // bytes written since last poll (delta)
+  uint32 net_connections = 10;  // active TCP/UDP connection count
+}
+
+message MetricsAck {
+  bool received = 1;
+}
+
+// ============== Logs ==============
+
+message LogEntry {
+  string agent_id = 1;
+  int64 timestamp = 2;
+  LogLevel level = 3;
+  string source = 4;          // "agent", "command:123", "service:nginx"
+  string message = 5;
+  map<string, string> metadata = 6;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARN = 3;
+  LOG_LEVEL_ERROR = 4;
+}
+
+message LogAck {
+  bool received = 1;
+}
+
+// ============== Heartbeat ==============
+
+message HeartbeatRequest {
+  string agent_id = 1;
+  int64 timestamp = 2;
+  AgentStatus status = 3;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  int64 server_time = 2;
+  // Control plane can send config updates
+  map<string, string> config_updates = 3;
+}
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_IDLE = 1;
+  AGENT_STATUS_BUSY = 2;
+  AGENT_STATUS_ERROR = 3;
+}
+
+// ============== SSH Management ==============
+
+// SSHSyncRequest contains SSH keys to sync to authorized_keys
+message SSHSyncRequest {
+  repeated SSHKeyEntry keys = 1;
+  string target_user = 2;     // Target user (e.g., "root", "ubuntu")
+  bool replace_all = 3;       // If true, replace entire file; if false, merge
+}
+
+message SSHKeyEntry {
+  string id = 1;              // Key ID for tracking
+  string public_key = 2;      // Full public key line
+  string name = 3;            // Human-readable name (for comment)
+  bool is_active = 4;         // Only sync active keys
+}
+
+message SSHSyncResponse {
+  bool success = 1;
+  string message = 2;
+  int32 keys_synced = 3;      // Number of keys written
+  string backup_path = 4;     // Path to backup file if created
+}
+
+// SSHConfigRequest updates sshd_config settings
+message SSHConfigRequest {
+  optional int32 port = 1;              // SSH port (default 22)
+  optional bool permit_root_login = 2;  // PermitRootLogin setting
+  optional bool password_auth = 3;      // PasswordAuthentication setting
+  optional bool pubkey_auth = 4;        // PubkeyAuthentication setting  
+  bool restart_sshd = 5;                // Restart sshd after changes
+  bool validate_config = 6;             // Run sshd -t before applying
+}
+
+message SSHConfigResponse {
+  bool success = 1;
+  string message = 2;
+  string backup_path = 3;     // Path to config backup
+  bool sshd_restarted = 4;    // Whether sshd was restarted
+}
+
+// SSHStatusRequest gets current SSH configuration
+message SSHStatusRequest {}
+
+message SSHStatusResponse {
+  int32 current_port = 1;
+  bool permit_root_login = 2;
+  bool password_auth = 3;
+  bool pubkey_auth = 4;
+  string sshd_status = 5;     // "running", "stopped", "unknown"
+  int32 authorized_keys_count = 6;
+}

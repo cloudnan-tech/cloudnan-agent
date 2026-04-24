@@ -1,0 +1,7 @@
+bin/
+/agent
+/cloudnan-agent
+/cloudnan-agent-linux-*
+# direnv (local env)
+.envrc
+.direnv/
