@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,10 +95,16 @@ func (h *Handler) Execute(ctx context.Context, args []string) *Result {
 	}
 }
 
-// ExecuteStreaming handles streaming ops. emit is called once per chunk;
-// the agent transport is responsible for wrapping each chunk into a
-// CommandResponse with Status=RUNNING and pushing it on the bidi stream.
-// Returns the final result; transport sends it as Status=COMPLETED (or FAILED).
+// ExecuteStreaming handles streaming ops. emit is called once per chunk and
+// is also forwarded to the transport for live progressive delivery on the
+// single-host path; we additionally accumulate every chunk into the Result's
+// Stdout so the cross-host dispatch path (pg_notify only forwards terminal
+// responses, not intermediate chunks) still receives the full payload in the
+// final CommandResponse.
+//
+// On the control plane side, parseChunkLines splits the terminal Stdout on
+// '\n' and feeds each line to onChunk, so the rendering is identical
+// regardless of whether the chunks arrived progressively or in one shot.
 func (h *Handler) ExecuteStreaming(
 	ctx context.Context,
 	args []string,
@@ -107,6 +114,18 @@ func (h *Handler) ExecuteStreaming(
 		return errResult("database command requires operation name in args[0]")
 	}
 	op := args[0]
+
+	// Wrap emit so every chunk is also captured into a buffer that we attach
+	// to Result.Stdout. The transport sees the same chunks live; the buffered
+	// copy travels in the final terminal CommandResponse.
+	var buf strings.Builder
+	bufferedEmit := func(chunk string) {
+		buf.WriteString(chunk)
+		if emit != nil {
+			emit(chunk)
+		}
+	}
+
 	switch op {
 	case "exec_query":
 		if len(args) < 2 {
@@ -116,15 +135,15 @@ func (h *Handler) ExecuteStreaming(
 		if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
 			return errResult(fmt.Sprintf("exec_query: unmarshal request: %v", err))
 		}
-		if err := h.opExecQuery(ctx, req, emit); err != nil {
+		if err := h.opExecQuery(ctx, req, bufferedEmit); err != nil {
 			return errResult(fmt.Sprintf("exec_query: %v", err))
 		}
-		return &Result{ExitCode: 0}
+		return &Result{ExitCode: 0, Stdout: buf.String()}
 	case "export_dump":
-		if err := h.opExportDump(ctx, args, emit); err != nil {
+		if err := h.opExportDump(ctx, args, bufferedEmit); err != nil {
 			return errResult(fmt.Sprintf("export_dump: %v", err))
 		}
-		return &Result{ExitCode: 0}
+		return &Result{ExitCode: 0, Stdout: buf.String()}
 	default:
 		return errResult(fmt.Sprintf("op %q is not streaming or is unknown", op))
 	}
