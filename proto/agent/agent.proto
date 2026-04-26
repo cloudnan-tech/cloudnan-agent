@@ -68,6 +68,13 @@ enum CommandType {
   COMMAND_TYPE_SSH = 7;       // SSH key/config operations
   COMMAND_TYPE_CHECK_MODULE = 8;  // Check if module binaries exist on filesystem
   COMMAND_TYPE_RECONNECT = 9;     // Internal blue-green deploy handoff signal
+  // Database management. args[0] = operation name (one of
+  // "discover", "connect", "disconnect", "ping", "list_dbs", "list_users",
+  // "create_db", "drop_db", "create_user", "grant", "drop_user", "exec_query",
+  // "export_dump"); args[1] = JSON-encoded Database*Request payload.
+  // Streaming results are delivered as multiple CommandResponse messages
+  // whose stdout each contains one JSON-encoded chunk.
+  COMMAND_TYPE_DATABASE = 10;
 }
 
 message CommandResponse {
@@ -359,4 +366,258 @@ message SSHStatusResponse {
   bool pubkey_auth = 4;
   string sshd_status = 5;     // "running", "stopped", "unknown"
   int32 authorized_keys_count = 6;
+}
+
+// ============== Database Management ==============
+
+enum DatabaseEngine {
+  DATABASE_ENGINE_UNSPECIFIED = 0;
+  DATABASE_ENGINE_MYSQL = 1;
+  DATABASE_ENGINE_MARIADB = 2;
+  DATABASE_ENGINE_POSTGRESQL = 3;
+}
+
+// How the agent reaches a particular DB instance on this host.
+message DatabaseConnection {
+  string host = 1;            // "127.0.0.1", "localhost"
+  uint32 port = 2;            // 0 if connecting via unix socket
+  string socket_path = 3;     // optional explicit unix socket path
+  bool use_tls = 4;
+  string tls_ca_pem = 5;      // optional CA cert; otherwise system trust
+}
+
+// Identifies an instance the agent has been told about. The agent's local
+// credential vault holds the actual creds keyed by instance_id.
+message DatabaseInstanceRef {
+  string instance_id = 1;
+}
+
+// ---- Discovery ----
+
+message DatabaseDiscoverRequest {
+  // Empty = scan for all supported engines.
+  repeated DatabaseEngine engines = 1;
+}
+
+message DatabaseDiscoverResponse {
+  repeated DatabaseDiscoveryCandidate candidates = 1;
+}
+
+message DatabaseDiscoveryCandidate {
+  DatabaseEngine engine = 1;
+  string discovery_method = 2;          // "systemd", "docker", "port_scan"
+  string display_name = 3;              // human-readable label for UI
+  DatabaseConnection connection = 4;
+  string version = 5;                   // detected server version, may be empty
+  string systemd_unit = 6;              // empty unless discovery_method == systemd
+  string docker_container_id = 7;
+  string docker_container_name = 8;
+  bool credentials_auto_extracted = 9;  // agent already has working creds
+  string credentials_source = 10;       // human-readable source explanation
+}
+
+// ---- Connect / Disconnect / Ping ----
+
+message DatabaseConnectRequest {
+  string instance_id = 1;               // assigned by control plane
+  DatabaseEngine engine = 2;
+  DatabaseConnection connection = 3;
+  string username = 4;
+  string password = 5;
+  // For an auto-discovered instance the agent may already have creds.
+  // Pass the discovery hint and the agent reuses local creds.
+  string discovery_hint = 6;            // e.g. "systemd:mysql.service"
+}
+
+message DatabaseConnectResponse {
+  bool success = 1;
+  string message = 2;
+  string server_version = 3;
+}
+
+message DatabaseDisconnectResponse {
+  bool success = 1;
+}
+
+message DatabasePingResponse {
+  bool reachable = 1;
+  uint64 latency_ms = 2;
+  string server_version = 3;
+}
+
+// ---- Listing ----
+
+message DatabaseEntry {
+  string name = 1;
+  uint64 size_bytes = 2;
+  string charset = 3;
+  string collation = 4;
+  string owner = 5;                     // PostgreSQL only
+}
+
+message DatabaseListDBsResponse {
+  repeated DatabaseEntry databases = 1;
+}
+
+message DatabaseUserEntry {
+  string username = 1;
+  string host = 2;                      // MySQL/MariaDB host part; "%" if any
+  repeated string granted_databases = 3;
+}
+
+message DatabaseListUsersResponse {
+  repeated DatabaseUserEntry users = 1;
+}
+
+// ---- Create / Drop ----
+
+message DatabaseCreateOwnerUser {
+  string username = 1;
+  string password = 2;
+  string host = 3;                      // MySQL/MariaDB; "%" if empty
+  bool grant_all_on_db = 4;
+}
+
+message DatabaseCreateDBRequest {
+  DatabaseInstanceRef instance = 1;
+  string database_name = 2;
+  string charset = 3;                   // engine default if empty
+  string collation = 4;
+  DatabaseCreateOwnerUser owner = 5;    // optional companion user
+}
+
+message DatabaseCreateDBResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DatabaseDropDBRequest {
+  DatabaseInstanceRef instance = 1;
+  string database_name = 2;
+  string confirmation_token = 3;
+}
+
+message DatabaseDropDBResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DatabaseCreateUserRequest {
+  DatabaseInstanceRef instance = 1;
+  string username = 2;
+  string password = 3;
+  string host = 4;                      // MySQL/MariaDB; "%" if empty
+}
+
+message DatabaseCreateUserResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DatabaseGrantRequest {
+  DatabaseInstanceRef instance = 1;
+  string username = 2;
+  string host = 3;
+  string database_name = 4;
+  repeated string privileges = 5;       // engine-specific names; "ALL" for full
+  bool revoke = 6;
+}
+
+message DatabaseGrantResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DatabaseDropUserRequest {
+  DatabaseInstanceRef instance = 1;
+  string username = 2;
+  string host = 3;
+  string confirmation_token = 4;
+}
+
+message DatabaseDropUserResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ---- Query runner ----
+
+message DatabaseExecQueryRequest {
+  DatabaseInstanceRef instance = 1;
+  string database_name = 2;             // engine-appropriate USE / search_path
+  string sql = 3;
+  bool read_only = 4;                   // agent rejects destructive statements
+  uint32 row_limit = 5;                 // truncate result set; 0 = engine default cap
+  uint32 timeout_seconds = 6;
+  string confirmation_token = 7;        // required when read_only=false
+}
+
+message DatabaseQueryResultChunk {
+  oneof body {
+    DatabaseQueryHeader header = 1;
+    DatabaseQueryRow row = 2;
+    DatabaseQueryFooter footer = 3;
+    DatabaseQueryError error = 4;
+  }
+}
+
+message DatabaseQueryHeader {
+  repeated string columns = 1;
+  repeated string column_types = 2;     // engine-specific type names
+}
+
+message DatabaseQueryRow {
+  // Per-cell encoding: cells[i] holds the UTF-8 / canonical-text repr.
+  // is_null[i] disambiguates NULL from empty string. Both arrays parallel.
+  repeated bytes cells = 1;
+  repeated bool is_null = 2;
+}
+
+message DatabaseQueryFooter {
+  uint64 row_count = 1;
+  uint64 affected_rows = 2;             // for non-SELECT
+  uint64 elapsed_ms = 3;
+  bool truncated = 4;                   // hit row_limit
+}
+
+message DatabaseQueryError {
+  string code = 1;                      // engine-specific
+  string message = 2;
+  uint32 line = 3;
+}
+
+// ---- Export / dump ----
+
+message DatabaseExportDestination {
+  string destination_id = 1;            // pointer to a backup_destination row
+  string object_key_prefix = 2;
+}
+
+message DatabaseExportDumpRequest {
+  DatabaseInstanceRef instance = 1;
+  repeated string database_names = 2;   // empty = all DBs the user can access
+  DatabaseExportDestination destination = 3;
+  // 32 bytes for AES-256-GCM. Agent encrypts before upload — Cloudnan never
+  // holds plaintext or the key. Generated client-side and stored by the
+  // user (or escrowed in the customer's KMS).
+  bytes encryption_key = 4;
+  bool compress = 5;                    // gzip before encryption
+}
+
+enum DatabaseExportPhase {
+  DATABASE_EXPORT_PHASE_UNSPECIFIED = 0;
+  DATABASE_EXPORT_PHASE_DUMPING = 1;
+  DATABASE_EXPORT_PHASE_UPLOADING = 2;
+  DATABASE_EXPORT_PHASE_COMPLETED = 3;
+  DATABASE_EXPORT_PHASE_FAILED = 4;
+}
+
+message DatabaseExportProgress {
+  DatabaseExportPhase phase = 1;
+  uint64 bytes_processed = 2;
+  uint64 bytes_total_estimate = 3;      // 0 if unknown
+  string current_database = 4;
+  string object_key = 5;                // populated on PHASE_COMPLETED
+  uint64 final_size_bytes = 6;
+  string error_message = 7;
 }

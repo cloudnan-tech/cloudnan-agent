@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cloudnan-tech/cloudnan-agent/internal/config"
+	"github.com/cloudnan-tech/cloudnan-agent/internal/database"
 	"github.com/cloudnan-tech/cloudnan-agent/internal/executor"
 	"github.com/cloudnan-tech/cloudnan-agent/internal/filesystem"
 	"github.com/cloudnan-tech/cloudnan-agent/internal/monitor"
@@ -37,6 +38,7 @@ type Agent struct {
 	monitor    *monitor.Monitor
 	sshHandler *ssh.Handler
 	fsManager  *filesystem.Manager
+	dbHandler  *database.Handler
 	conn       *grpc.ClientConn
 
 	// Agent state
@@ -81,6 +83,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 	mon := monitor.New()
 	sshHandler := ssh.NewHandler("/var/backups/cloudnan/ssh")
 	fsManager := filesystem.New("/")
+	dbHandler := database.NewHandler()
 
 	return &Agent{
 		cfg:         cfg,
@@ -88,6 +91,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		monitor:     mon,
 		sshHandler:  sshHandler,
 		fsManager:   fsManager,
+		dbHandler:   dbHandler,
 		agentID:     agentID,
 		hostname:    hostname,
 		version:     version,
@@ -755,6 +759,32 @@ func (a *Agent) executeCommand(ctx context.Context, stream pb.AgentService_Comma
 	case pb.CommandType_COMMAND_TYPE_CHECK_MODULE:
 		// Check if modules are installed by checking binary paths on filesystem
 		result = a.checkModules(cmd.Args)
+
+	case pb.CommandType_COMMAND_TYPE_DATABASE:
+		// Database operations (mysql, postgresql, mariadb).
+		// args[0] = operation name (discover, connect, ping, list_dbs,
+		// create_db, exec_query, export_dump, ...). For streaming ops the
+		// agent emits each chunk as Status=RUNNING and the final result is
+		// reported by the common epilogue below.
+		if len(cmd.Args) < 1 {
+			execErr = fmt.Errorf("DATABASE command requires operation name in args[0]")
+			break
+		}
+		op := cmd.Args[0]
+		if database.IsStreamingOp(op) {
+			emit := func(chunk string) {
+				_ = stream.Send(&pb.CommandResponse{
+					CommandId: cmd.Id,
+					Status:    pb.CommandStatus_COMMAND_STATUS_RUNNING,
+					Stdout:    chunk,
+				})
+			}
+			r := a.dbHandler.ExecuteStreaming(execCtx, cmd.Args, emit)
+			result = &executor.Result{ExitCode: r.ExitCode, Stdout: r.Stdout, Stderr: r.Stderr}
+		} else {
+			r := a.dbHandler.Execute(execCtx, cmd.Args)
+			result = &executor.Result{ExitCode: r.ExitCode, Stdout: r.Stdout, Stderr: r.Stderr}
+		}
 
 	default:
 		result = &executor.Result{
