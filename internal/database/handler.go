@@ -106,8 +106,20 @@ func (h *Handler) ExecuteStreaming(
 	}
 	op := args[0]
 	switch op {
-	case "exec_query", "export_dump":
-		return errResult(fmt.Sprintf("database op %q not implemented (planned for PR 4)", op))
+	case "exec_query":
+		if len(args) < 2 {
+			return errResult("exec_query: missing JSON request in args[1]")
+		}
+		req := &pb.DatabaseExecQueryRequest{}
+		if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+			return errResult(fmt.Sprintf("exec_query: unmarshal request: %v", err))
+		}
+		if err := h.opExecQuery(ctx, req, emit); err != nil {
+			return errResult(fmt.Sprintf("exec_query: %v", err))
+		}
+		return &Result{ExitCode: 0}
+	case "export_dump":
+		return errResult(fmt.Sprintf("database op %q not implemented (planned for PR 5)", op))
 	default:
 		return errResult(fmt.Sprintf("op %q is not streaming or is unknown", op))
 	}

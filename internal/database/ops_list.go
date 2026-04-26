@@ -24,9 +24,7 @@ package database
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/lib/pq"
@@ -234,48 +232,6 @@ SELECT r.rolname,
 }
 
 // ---------- shared helpers ----------
-
-// openInstance is the canonical setup path used by every per-instance op:
-// it resolves credentials from the vault, picks the right driver, opens a
-// pool, and returns the driver + *sql.DB + the original CredEntry. The
-// caller is responsible for db.Close(). On any error along the way the
-// pool (if opened) is closed before returning.
-func (h *Handler) openInstance(ctx context.Context, instanceID string) (Driver, *sql.DB, *CredEntry, error) {
-	if instanceID == "" {
-		return nil, nil, nil, errors.New("instance_id is required")
-	}
-	vault, err := h.ensureVault()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("vault: %w", err)
-	}
-	entry, err := vault.Get(instanceID)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, nil, fmt.Errorf("unknown instance %q (not in vault)", instanceID)
-		}
-		return nil, nil, nil, fmt.Errorf("vault get: %w", err)
-	}
-	engine, ok := engineStringToEnum(entry.Engine)
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("unknown engine %q in vault", entry.Engine)
-	}
-	driver, err := DriverFor(engine)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	conn := &pb.DatabaseConnection{
-		Host:       entry.Host,
-		Port:       entry.Port,
-		SocketPath: entry.SocketPath,
-		UseTls:     entry.UseTLS,
-		TlsCaPem:   entry.TLSCAPem,
-	}
-	db, err := driver.Open(ctx, conn, entry.Username, entry.Password)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open: %w", err)
-	}
-	return driver, db, entry, nil
-}
 
 // splitCSV splits a comma-separated list, dropping empty tokens. Returns
 // nil for an empty/whitespace-only input so the proto field stays zero
