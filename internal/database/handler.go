@@ -88,7 +88,7 @@ func (h *Handler) Execute(ctx context.Context, args []string) *Result {
 		return h.opGrantCmd(ctx, args)
 	case "drop_user":
 		return h.opDropUserCmd(ctx, args)
-	case "exec_query", "export_dump":
+	case "exec_query", "export_dump", "restore_dump":
 		return errResult(fmt.Sprintf("database op %q is streaming; caller must use ExecuteStreaming", op))
 	default:
 		return errResult(fmt.Sprintf("unknown database op %q", op))
@@ -144,6 +144,11 @@ func (h *Handler) ExecuteStreaming(
 			return errResult(fmt.Sprintf("export_dump: %v", err))
 		}
 		return &Result{ExitCode: 0, Stdout: buf.String()}
+	case "restore_dump":
+		if err := h.opRestoreDump(ctx, args, bufferedEmit); err != nil {
+			return errResult(fmt.Sprintf("restore_dump: %v", err))
+		}
+		return &Result{ExitCode: 0, Stdout: buf.String()}
 	default:
 		return errResult(fmt.Sprintf("op %q is not streaming or is unknown", op))
 	}
@@ -151,7 +156,7 @@ func (h *Handler) ExecuteStreaming(
 
 // IsStreamingOp reports whether the named op uses streaming chunks.
 func IsStreamingOp(op string) bool {
-	return op == "exec_query" || op == "export_dump"
+	return op == "exec_query" || op == "export_dump" || op == "restore_dump"
 }
 
 // ensureVault opens (or returns the cached) vault. Errors are sticky: once
