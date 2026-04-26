@@ -302,6 +302,14 @@ func (v *Vault) readAll() (map[string]*CredEntry, error) {
 	if err := auditFilePerms(v.blobPath, vaultBlobPerm); err != nil {
 		return nil, err
 	}
+	// The lockfile path opens the blob with O_CREATE on first use so flock has
+	// a valid descriptor to lock against, leaving an empty file behind. Treat
+	// "exists but empty" the same as "doesn't exist yet" — first writeAll will
+	// populate it. Any non-empty file shorter than nonce+tag is real corruption
+	// and falls through to the decrypt error path.
+	if len(data) == 0 {
+		return map[string]*CredEntry{}, nil
+	}
 	plain, err := decrypt(key, data)
 	if err != nil {
 		return nil, fmt.Errorf("vault: decrypt: %w", err)
