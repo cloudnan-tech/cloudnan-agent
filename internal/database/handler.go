@@ -5,10 +5,14 @@
 // that take a payload) args[1] = JSON-encoded protobuf request. Responses
 // are written back as JSON-encoded protobuf in Result.Stdout.
 //
-// PR 2 implements: discover, connect, disconnect, ping. The remaining ops
-// (list_dbs, list_users, create_db, drop_db, create_user, grant, drop_user)
-// keep their "not implemented (planned for PR 3)" stub returns. The
-// streaming ops (exec_query, export_dump) are placeholders for PR 4 / 5.
+// PR 2 implements: discover, connect, disconnect, ping. PR 3 adds
+// list_dbs, list_users, create_db, drop_db, create_user, grant, drop_user.
+// The streaming ops (exec_query, export_dump) are placeholders for PR 4 / 5.
+//
+// Destructive operations (drop_db, drop_user) require a confirmation
+// token (HMAC-SHA256 of a payload binding op + instance + target +
+// expiry) minted by the control plane and verified locally before any
+// SQL is executed — see token.go.
 //
 // The handler holds a lazily-opened *Vault. We open the vault on first DB
 // op rather than at agent startup so a host that never uses DB management
@@ -67,9 +71,20 @@ func (h *Handler) Execute(ctx context.Context, args []string) *Result {
 		return h.opDisconnect(ctx, args)
 	case "ping":
 		return h.opPing(ctx, args)
-	case "list_dbs", "list_users",
-		"create_db", "drop_db", "create_user", "grant", "drop_user":
-		return errResult(fmt.Sprintf("database op %q not implemented (planned for PR 3)", op))
+	case "list_dbs":
+		return h.opListDBsCmd(ctx, args)
+	case "list_users":
+		return h.opListUsersCmd(ctx, args)
+	case "create_db":
+		return h.opCreateDBCmd(ctx, args)
+	case "drop_db":
+		return h.opDropDBCmd(ctx, args)
+	case "create_user":
+		return h.opCreateUserCmd(ctx, args)
+	case "grant":
+		return h.opGrantCmd(ctx, args)
+	case "drop_user":
+		return h.opDropUserCmd(ctx, args)
 	case "exec_query", "export_dump":
 		return errResult(fmt.Sprintf("database op %q is streaming; caller must use ExecuteStreaming", op))
 	default:
@@ -321,6 +336,148 @@ func marshalOK(msg proto.Message, op string) *Result {
 	return &Result{ExitCode: 0, Stdout: string(b)}
 }
 
+// protoResult is the convenience entry point used by the PR-3 ops, which
+// don't need the per-op label that marshalOK builds into its error.
+func protoResult(msg proto.Message) *Result {
+	b, err := protojson.Marshal(msg)
+	if err != nil {
+		return errResult(fmt.Sprintf("marshal response: %v", err))
+	}
+	return &Result{ExitCode: 0, Stdout: string(b)}
+}
+
 func errResult(msg string) *Result {
 	return &Result{ExitCode: 1, Stderr: msg}
+}
+
+// ---------- PR 3 dispatch wrappers ----------
+//
+// Each wrapper unmarshals args[1] into the right pb.*Request, delegates
+// to the engine-aware op*, and serializes the response (or surfaces the
+// error). Destructive ops verify the confirmation token before delegating.
+
+func (h *Handler) opListDBsCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("list_dbs: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseInstanceRef{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("list_dbs: unmarshal request: %v", err))
+	}
+	resp, err := h.opListDBs(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("list_dbs: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opListUsersCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("list_users: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseInstanceRef{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("list_users: unmarshal request: %v", err))
+	}
+	resp, err := h.opListUsers(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("list_users: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opCreateDBCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("create_db: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseCreateDBRequest{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("create_db: unmarshal request: %v", err))
+	}
+	resp, err := h.opCreateDB(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("create_db: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opCreateUserCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("create_user: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseCreateUserRequest{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("create_user: unmarshal request: %v", err))
+	}
+	resp, err := h.opCreateUser(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("create_user: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opGrantCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("grant: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseGrantRequest{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("grant: unmarshal request: %v", err))
+	}
+	resp, err := h.opGrant(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("grant: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opDropDBCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("drop_db: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseDropDBRequest{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("drop_db: unmarshal request: %v", err))
+	}
+	if err := verifyOpToken(
+		req.GetConfirmationToken(),
+		"drop_db",
+		req.GetInstance().GetInstanceId(),
+		req.GetDatabaseName(),
+	); err != nil {
+		return errResult(fmt.Sprintf("drop_db: token verification failed: %v", err))
+	}
+	resp, err := h.opDropDB(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("drop_db: %v", err))
+	}
+	return protoResult(resp)
+}
+
+func (h *Handler) opDropUserCmd(ctx context.Context, args []string) *Result {
+	if len(args) < 2 {
+		return errResult("drop_user: missing JSON request in args[1]")
+	}
+	req := &pb.DatabaseDropUserRequest{}
+	if err := protojson.Unmarshal([]byte(args[1]), req); err != nil {
+		return errResult(fmt.Sprintf("drop_user: unmarshal request: %v", err))
+	}
+	host := req.GetHost()
+	if host == "" {
+		host = defaultMySQLHost
+	}
+	target := fmt.Sprintf("%s@%s", req.GetUsername(), host)
+	if err := verifyOpToken(
+		req.GetConfirmationToken(),
+		"drop_user",
+		req.GetInstance().GetInstanceId(),
+		target,
+	); err != nil {
+		return errResult(fmt.Sprintf("drop_user: token verification failed: %v", err))
+	}
+	resp, err := h.opDropUser(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("drop_user: %v", err))
+	}
+	return protoResult(resp)
 }
