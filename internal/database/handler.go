@@ -7,7 +7,9 @@
 //
 // PR 2 implements: discover, connect, disconnect, ping. PR 3 adds
 // list_dbs, list_users, create_db, drop_db, create_user, grant, drop_user.
-// The streaming ops (exec_query, export_dump) are placeholders for PR 4 / 5.
+// PR 4 wires exec_query (streaming NDJSON of pb.DatabaseQueryResultChunk).
+// PR 5 wires export_dump (streaming NDJSON of pb.DatabaseExportProgress
+// with the dump piped through AES-256-GCM into S3-compatible storage).
 //
 // Destructive operations (drop_db, drop_user) require a confirmation
 // token (HMAC-SHA256 of a payload binding op + instance + target +
@@ -119,7 +121,10 @@ func (h *Handler) ExecuteStreaming(
 		}
 		return &Result{ExitCode: 0}
 	case "export_dump":
-		return errResult(fmt.Sprintf("database op %q not implemented (planned for PR 5)", op))
+		if err := h.opExportDump(ctx, args, emit); err != nil {
+			return errResult(fmt.Sprintf("export_dump: %v", err))
+		}
+		return &Result{ExitCode: 0}
 	default:
 		return errResult(fmt.Sprintf("op %q is not streaming or is unknown", op))
 	}
